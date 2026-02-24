@@ -30,8 +30,8 @@ let lastMessage = null;
 let connectionStartTime;
 
 function printCounts() {
-  const currentTime = new Date();
-  wsConsole.print(Console.Types.Control, `Connection Open for ${currentTime - connectionStartTime} ms`, Console.Colors.Green);
+  const elapsed = Date.now() - connectionStartTime;
+  wsConsole.print(Console.Types.Control, `Connection Open for ${elapsed} ms`, Console.Colors.Green);
   wsConsole.print(Console.Types.Control, `${messagesReceived} message(s) Received`, Console.Colors.Green);
   wsConsole.print(Console.Types.Control, `${messagesSent} message(s) Sent`, Console.Colors.Green);
   wsConsole.print(Console.Types.Control, `${pingsReceived} ping(s) Received`, Console.Colors.Green);
@@ -51,6 +51,14 @@ function printCommands() {
   wsConsole.print(Console.Types.Control, "'> close' to gracefully close connection to the server", Console.Colors.Green);
   wsConsole.print(Console.Types.Control, "'> last' to reprint last received message", Console.Colors.Green);
   wsConsole.print(Console.Types.Control, "'> counts' to print frame counts", Console.Colors.Green);
+}
+
+function startKeepalive(socket) {
+  return setInterval(() => {
+    socket.ping();
+    pingsSent++;
+    wsConsole.print(Console.Types.Control, 'ping sent', Console.Colors.Green);
+  }, opts.keepalive);
 }
 
 function handleSlashCommand(data) {
@@ -75,7 +83,6 @@ function handleSlashCommand(data) {
 }
 
 function parseInput(data) {
-  const opts = program.opts();
   if (opts.parsecommands) {
     if (data.startsWith('send ')) {
       const msg = data.slice('send '.length);
@@ -94,7 +101,6 @@ function parseInput(data) {
       ws.close(1001, 'Client Closing.');
       wsConsole.print(Console.Types.Control, 'Connection Closed', Console.Colors.Green);
       printCounts();
-      console.timeEnd('ConnectionLasted');
       process.exit();
     } else if (data === 'last') {
       if (lastMessage) {
@@ -119,6 +125,20 @@ function parseInput(data) {
  * Console - wraps readline with ANSI color support.
  */
 class Console extends EventEmitter {
+  static Colors = Object.freeze({
+    Red: '\x1b[31m',
+    Green: '\x1b[32m',
+    Yellow: '\x1b[33m',
+    Blue: '\x1b[34m',
+    Default: '\x1b[39m'
+  });
+
+  static Types = Object.freeze({
+    Incoming: '< ',
+    Control: '',
+    Error: 'error: '
+  });
+
   constructor() {
     super();
 
@@ -134,24 +154,6 @@ class Console extends EventEmitter {
     this._resetInput = () => this.clear();
   }
 
-  static get Colors() {
-    return {
-      Red: '\x1b[31m',
-      Green: '\x1b[32m',
-      Yellow: '\x1b[33m',
-      Blue: '\x1b[34m',
-      Default: '\x1b[39m'
-    };
-  }
-
-  static get Types() {
-    return {
-      Incoming: '< ',
-      Control: '',
-      Error: 'error: '
-    };
-  }
-
   prompt(preserveCursor) {
     if (process.stdout.isTTY) {
       this.readlineInterface.prompt(preserveCursor);
@@ -163,10 +165,6 @@ class Console extends EventEmitter {
   }
 
   print(type, msg, color) {
-    const opts = program.opts();
-    const useColor = opts.color !== false;
-
-    // In non-TTY mode: only write incoming messages to stdout; errors to stderr
     if (!process.stdout.isTTY) {
       if (type === Console.Types.Incoming) {
         process.stdout.write(`${msg}\n`);
@@ -179,7 +177,7 @@ class Console extends EventEmitter {
     this.clear();
     color = color || Console.Colors.Default;
     const prefix = type || '';
-    if (useColor) {
+    if (opts.color !== false) {
       this.stdout.write(`${color}${prefix}${msg}${Console.Colors.Default}\n`);
     } else {
       this.stdout.write(`${prefix}${msg}\n`);
@@ -202,17 +200,12 @@ class Console extends EventEmitter {
   }
 }
 
-function collect(xs) {
-  xs = xs || [];
-  return (x) => {
-    xs.push(x);
-    return xs;
-  };
-}
+// collector for repeatable options: .option(..., collect, [])
+const collect = (val, list) => [...list, val];
 
-function splitOnce(sep, str) {
-  const tokens = str.split(sep);
-  return [tokens[0], str.replace(sep, '').substr(tokens[0].length)];
+function splitOnce(str, sep) {
+  const i = str.indexOf(sep);
+  return i === -1 ? [str, ''] : [str.slice(0, i), str.slice(i + 1)];
 }
 
 /**
@@ -225,15 +218,15 @@ program
   .usage('[options] (--listen <port> | --connect <url>)')
   .option('-l, --listen <port>', 'listen on port')
   .option('-c, --connect <url>', 'connect to a websocket server')
-  .option('-m, --message <message>', 'initial message to send (repeatable)', collect(), [])
-  .option('-x, --execute <cmd>', 'send message on open, then close after --wait (repeatable)', collect(), [])
+  .option('-m, --message <message>', 'initial message to send (repeatable)', collect, [])
+  .option('-x, --execute <cmd>', 'send message on open, then close after --wait (repeatable)', collect, [])
   .option('-w, --wait <seconds>', 'wait time after --execute (-1 = hold open)', 2)
   .option('-p, --protocol <version>', 'optional protocol version')
   .option('-o, --origin <origin>', 'optional origin')
   .option('--host <host>', 'optional host')
-  .option('-s, --subprotocol <protocol>', 'optional subprotocol (repeatable)', collect(), [])
+  .option('-s, --subprotocol <protocol>', 'optional subprotocol (repeatable)', collect, [])
   .option('-n, --no-check', 'do not check for unauthorized certificates')
-  .option('-H, --header <header:value>', 'set an HTTP header, repeat for multiple (--connect only)', collect(), [])
+  .option('-H, --header <header:value>', 'set an HTTP header, repeat for multiple (--connect only)', collect, [])
   .option('--auth <username:password>', 'add basic HTTP authentication header (--connect only)')
   .option('--proxy <url>', 'connect via HTTP proxy')
   .option('--ca <file>', 'CA certificate file')
@@ -268,7 +261,6 @@ if (opts.listen && opts.connect) {
   if (opts.subprotocol && opts.subprotocol.length) options.protocol = opts.subprotocol.join(', ');
   if (!opts.check) options.rejectUnauthorized = false;
 
-  ws = null;
   const wss = new WebSocket.Server({ port: opts.listen }, () => {
     wsConsole.print(Console.Types.Control, `listening on port ${opts.listen} (press CTRL+C to quit)`, Console.Colors.Green);
     if (opts.parsecommands) printCommands();
@@ -289,22 +281,14 @@ if (opts.listen && opts.connect) {
     wsConsole.resume();
     wsConsole.prompt();
     wsConsole.print(Console.Types.Control, 'client connected', Console.Colors.Green);
-    console.time('ConnectionLasted');
-    connectionStartTime = new Date();
+    connectionStartTime = Date.now();
 
-    if (opts.keepalive) {
-      interval = setInterval(() => {
-        ws.ping();
-        pingsSent++;
-        wsConsole.print(Console.Types.Control, 'ping sent', Console.Colors.Green);
-      }, opts.keepalive);
-    }
+    if (opts.keepalive) interval = startKeepalive(ws);
 
     ws.on('close', (code, reason) => {
       const reasonStr = reason ? reason.toString() : '';
       wsConsole.print(Console.Types.Control, `disconnected (code: ${code}, reason: "${reasonStr}")`, Console.Colors.Green);
       printCounts();
-      console.timeEnd('ConnectionLasted');
       if (interval != null) {
         clearInterval(interval);
         interval = null;
@@ -319,10 +303,10 @@ if (opts.listen && opts.connect) {
       lastMessage = data.toString();
       wsConsole.print(Console.Types.Incoming, lastMessage, Console.Colors.Blue);
       messagesReceived++;
-    }).on('pong', (data) => {
+    }).on('pong', () => {
       pongsReceived++;
       if (opts.showPingPong) wsConsole.print(Console.Types.Control, 'pong received', Console.Colors.Green);
-    }).on('ping', (data) => {
+    }).on('ping', () => {
       // ws v8 automatically sends the pong frame before emitting this event
       pingsReceived++;
       pongsSent++;
@@ -348,13 +332,13 @@ if (opts.listen && opts.connect) {
     if (opts.key) options.key = fs.readFileSync(opts.key);
     if (passphrase) options.passphrase = passphrase;
     if (opts.location) options.followRedirects = true;
-    if (opts.maxRedirects) options.maxRedirects = parseInt(opts.maxRedirects, 10);
+    if (opts.maxRedirects) options.maxRedirects = opts.maxRedirects;
     if (opts.proxy) options.agent = new HttpsProxyAgent(opts.proxy);
 
     const headers = {};
     (opts.header || []).forEach((h) => {
-      const parts = splitOnce(':', h);
-      headers[parts[0]] = parts[1];
+      const [key, val] = splitOnce(h, ':');
+      headers[key] = val;
     });
 
     if (opts.auth) {
@@ -370,18 +354,18 @@ if (opts.listen && opts.connect) {
     connectUrl = `ws://${connectUrl}`;
   }
 
-  const retryTimer = { ref: null };
+  let retryTimer = null;
   let numRetries = 0;
   const maxRetries = 4;
 
   const retry = () => {
-    if (retryTimer.ref) return;
+    if (retryTimer) return;
     if (++numRetries > maxRetries) {
       wsConsole.setPrompt('disconnected, press return to retry or ctrl-c to quit');
       wsConsole.prompt();
     } else {
-      retryTimer.ref = setTimeout(() => {
-        retryTimer.ref = null;
+      retryTimer = setTimeout(() => {
+        retryTimer = null;
         connect(cachedPassphrase);
       }, 500);
     }
@@ -397,20 +381,12 @@ if (opts.listen && opts.connect) {
       wsConsole.prompt();
     }
 
-    const options = buildOptions(passphrase);
-    ws = new WebSocket(connectUrl, options);
+    ws = new WebSocket(connectUrl, buildOptions(passphrase));
 
     ws.on('open', () => {
-      console.time('ConnectionLasted');
-      connectionStartTime = new Date();
+      connectionStartTime = Date.now();
 
-      if (opts.keepalive) {
-        interval = setInterval(() => {
-          ws.ping();
-          pingsSent++;
-          wsConsole.print(Console.Types.Control, 'ping sent', Console.Colors.Green);
-        }, opts.keepalive);
-      }
+      if (opts.keepalive) interval = startKeepalive(ws);
 
       wsConsole.print(Console.Types.Control, 'connected (press CTRL+C to quit)', Console.Colors.Green);
 
@@ -422,20 +398,15 @@ if (opts.listen && opts.connect) {
       });
 
       // --execute: send then close after --wait seconds
-      const execMsgs = opts.execute || [];
-      if (execMsgs.length > 0) {
-        execMsgs.forEach((msg) => {
+      if (opts.execute.length > 0) {
+        opts.execute.forEach((msg) => {
           ws.send(msg);
           wsConsole.print(Console.Types.Control, `> ${msg}`);
           messagesSent++;
         });
         const waitSecs = parseFloat(opts.wait);
-        if (waitSecs >= 0) {
-          setTimeout(() => {
-            ws.close();
-          }, waitSecs * 1000);
-        }
-        // if waitSecs === -1, hold open forever (user must Ctrl+C)
+        if (waitSecs >= 0) setTimeout(() => ws.close(), waitSecs * 1000);
+        // waitSecs === -1: hold open forever (user must Ctrl+C)
       }
 
       wsConsole.setPrompt('> ');
@@ -473,10 +444,10 @@ if (opts.listen && opts.connect) {
       messagesReceived++;
       lastMessage = data.toString();
       wsConsole.print(Console.Types.Incoming, lastMessage, Console.Colors.Blue);
-    }).on('pong', (data) => {
+    }).on('pong', () => {
       pongsReceived++;
       if (opts.showPingPong) wsConsole.print(Console.Types.Control, 'pong received', Console.Colors.Green);
-    }).on('ping', (data) => {
+    }).on('ping', () => {
       // ws v8 automatically sends the pong frame before emitting this event
       pingsReceived++;
       pongsSent++;
@@ -484,24 +455,20 @@ if (opts.listen && opts.connect) {
     });
   };
 
-  const start = () => {
-    // Handle passphrase: if --passphrase given without value, prompt interactively
-    if (opts.passphrase === true) {
-      read({ prompt: 'Passphrase: ', silent: true }, (err, passphrase) => {
-        if (err) {
-          process.stderr.write(`error: ${err.message}\n`);
-          process.exit(1);
-        }
-        cachedPassphrase = passphrase;
-        connect(passphrase);
-      });
-    } else {
-      cachedPassphrase = opts.passphrase;
-      connect(opts.passphrase);
-    }
-  };
-
-  start();
+  // Handle --passphrase: prompt interactively if no value given
+  if (opts.passphrase === true) {
+    read({ prompt: 'Passphrase: ', silent: true }, (err, passphrase) => {
+      if (err) {
+        process.stderr.write(`error: ${err.message}\n`);
+        process.exit(1);
+      }
+      cachedPassphrase = passphrase;
+      connect(passphrase);
+    });
+  } else {
+    cachedPassphrase = opts.passphrase;
+    connect(opts.passphrase);
+  }
 
   wsConsole.on('line', (data) => {
     if (!isOpen && numRetries > maxRetries) { numRetries = 0; connect(cachedPassphrase); }
