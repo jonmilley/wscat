@@ -1,261 +1,19 @@
 #!/usr/bin/env node
 
-'use strict';
-
 /*!
  * ws: a node.js websocket client
  * Copyright(c) 2011 Einar Otto Stangvik <einaros@gmail.com>
  * MIT Licensed
  */
 
-const { program } = require('commander');
-const readline = require('readline');
-const { EventEmitter } = require('events');
-const WebSocket = require('ws');
-const fs = require('fs');
-const { HttpsProxyAgent } = require('https-proxy-agent');
-const read = require('read');
+import { program } from 'commander';
+import { createRequire } from 'module';
+import { WsEngine } from '../lib/ws-engine.js';
 
-/*****************************
- * Stats tracking
- */
-let interval = null;
-
-const stats = {
-  messagesSent: 0,
-  messagesReceived: 0,
-  pingsSent: 0,
-  pingsReceived: 0,
-  pongsSent: 0,
-  pongsReceived: 0,
-  lastMessage: null,
-  connectionStartTime: null
-};
-
-function resetStats() {
-  stats.messagesSent = 0;
-  stats.messagesReceived = 0;
-  stats.pingsSent = 0;
-  stats.pingsReceived = 0;
-  stats.pongsSent = 0;
-  stats.pongsReceived = 0;
-  stats.lastMessage = null;
-  stats.connectionStartTime = null;
-}
-
-function printCounts() {
-  const elapsed = Date.now() - stats.connectionStartTime;
-  wsConsole.print(Console.Types.Control, `Connection Open for ${elapsed} ms`, Console.Colors.Green);
-  wsConsole.print(Console.Types.Control, `${stats.messagesReceived} message(s) Received`, Console.Colors.Green);
-  wsConsole.print(Console.Types.Control, `${stats.messagesSent} message(s) Sent`, Console.Colors.Green);
-  wsConsole.print(Console.Types.Control, `${stats.pingsReceived} ping(s) Received`, Console.Colors.Green);
-  wsConsole.print(Console.Types.Control, `${stats.pingsSent} ping(s) Sent`, Console.Colors.Green);
-  wsConsole.print(Console.Types.Control, `${stats.pongsReceived} pong(s) Received`, Console.Colors.Green);
-  wsConsole.print(Console.Types.Control, `${stats.pongsSent} pong(s) Sent`, Console.Colors.Green);
-  if (stats.lastMessage) {
-    wsConsole.print(Console.Types.Control, 'Last Message Received =', Console.Colors.Green);
-    wsConsole.print(Console.Types.Incoming, stats.lastMessage);
-  }
-}
-
-function printCommands() {
-  wsConsole.print(Console.Types.Control, "'> send <message>' to send <message> to server", Console.Colors.Green);
-  wsConsole.print(Console.Types.Control, "'> ping' to send a ping to the server", Console.Colors.Green);
-  wsConsole.print(Console.Types.Control, "'> pong' to send pong to the server", Console.Colors.Green);
-  wsConsole.print(Console.Types.Control, "'> close' to gracefully close connection to the server", Console.Colors.Green);
-  wsConsole.print(Console.Types.Control, "'> last' to reprint last received message", Console.Colors.Green);
-  wsConsole.print(Console.Types.Control, "'> counts' to print frame counts", Console.Colors.Green);
-}
-
-function startKeepalive(socket) {
-  return setInterval(() => {
-    socket.ping();
-    stats.pingsSent++;
-    wsConsole.print(Console.Types.Control, 'ping sent', Console.Colors.Green);
-  }, opts.keepalive);
-}
-
-function handleSlashCommand(data) {
-  if (data.startsWith('/ping')) {
-    const payload = data.slice('/ping'.length).trim();
-    ws.ping(payload || undefined);
-    stats.pingsSent++;
-    wsConsole.print(Console.Types.Control, 'ping sent', Console.Colors.Green);
-  } else if (data.startsWith('/pong')) {
-    const payload = data.slice('/pong'.length).trim();
-    ws.pong(payload || undefined);
-    stats.pongsSent++;
-    wsConsole.print(Console.Types.Control, 'pong sent', Console.Colors.Green);
-  } else if (data.startsWith('/close')) {
-    const parts = data.slice('/close'.length).trim().split(/\s+/);
-    const code = parts[0] ? parseInt(parts[0], 10) : 1000;
-    const reason = parts.slice(1).join(' ') || '';
-    ws.close(code, reason);
-  } else {
-    wsConsole.print(Console.Types.Error, `Unknown slash command: ${data}`, Console.Colors.Red);
-  }
-}
-
-function parseInput(data) {
-  if (opts.parsecommands) {
-    if (data.startsWith('send ')) {
-      const msg = data.slice('send '.length);
-      ws.send(msg);
-      wsConsole.print(Console.Types.Control, `sent (${msg})`, Console.Colors.Green);
-      stats.messagesSent++;
-    } else if (data === 'ping' || data.startsWith('ping ')) {
-      ws.ping();
-      stats.pingsSent++;
-      wsConsole.print(Console.Types.Control, 'ping sent', Console.Colors.Green);
-    } else if (data === 'pong' || data.startsWith('pong ')) {
-      ws.pong();
-      stats.pongsSent++;
-      wsConsole.print(Console.Types.Control, 'pong sent', Console.Colors.Green);
-    } else if (data === 'close' || data.startsWith('close ')) {
-      ws.close(1001, 'Client Closing.');
-      wsConsole.print(Console.Types.Control, 'Connection Closed', Console.Colors.Green);
-    } else if (data === 'last') {
-      if (stats.lastMessage) {
-        wsConsole.print(Console.Types.Control, 'Last Message Received =', Console.Colors.Green);
-        wsConsole.print(Console.Types.Incoming, stats.lastMessage);
-      }
-    } else if (data === 'counts') {
-      printCounts();
-    } else if (opts.slash && data.startsWith('/')) {
-      handleSlashCommand(data);
-    }
-  } else if (opts.slash && data.startsWith('/')) {
-    handleSlashCommand(data);
-  } else {
-    ws.send(data);
-    stats.messagesSent++;
-  }
-  wsConsole.prompt();
-}
-
-/**
- * Wires shared socket event handlers onto a socket.
- * @param {WebSocket} socket - the websocket to attach handlers to
- * @param {Function} onClose - callback invoked after close handling (code, reasonStr)
- */
-function wireSocketEvents(socket, onClose) {
-  socket.on('close', (code, reason) => {
-    const reasonStr = reason ? reason.toString() : '';
-    wsConsole.print(Console.Types.Control, `disconnected (code: ${code}, reason: "${reasonStr}")`, Console.Colors.Green);
-    printCounts();
-    if (interval != null) {
-      clearInterval(interval);
-      interval = null;
-    }
-    wsConsole.clear();
-    onClose(code, reasonStr);
-  }).on('message', (data) => {
-    stats.messagesReceived++;
-    stats.lastMessage = data.toString();
-    wsConsole.print(Console.Types.Incoming, stats.lastMessage, Console.Colors.Blue);
-  }).on('pong', () => {
-    stats.pongsReceived++;
-    if (opts.showPingPong) wsConsole.print(Console.Types.Control, 'pong received', Console.Colors.Green);
-  }).on('ping', () => {
-    // ws v8 automatically sends the pong frame before emitting this event
-    stats.pingsReceived++;
-    stats.pongsSent++;
-    if (opts.showPingPong) wsConsole.print(Console.Types.Control, 'pong sent (auto-reply)', Console.Colors.Green);
-  });
-}
-
-/**
- * Console - wraps readline with ANSI color support.
- */
-class Console extends EventEmitter {
-  static Colors = Object.freeze({
-    Red: '\x1b[31m',
-    Green: '\x1b[32m',
-    Yellow: '\x1b[33m',
-    Blue: '\x1b[34m',
-    Default: '\x1b[39m'
-  });
-
-  static Types = Object.freeze({
-    Incoming: '< ',
-    Control: '',
-    Error: 'error: '
-  });
-
-  constructor() {
-    super();
-
-    this.stdin = process.stdin;
-    this.stdout = process.stdout;
-    this._closed = false;
-
-    this.readlineInterface = readline.createInterface(this.stdin, this.stdout);
-
-    this.readlineInterface
-      .on('line', (data) => this.emit('line', data))
-      .on('close', () => { this._closed = true; this.emit('close'); });
-
-    this._resetInput = () => this.clear();
-  }
-
-  prompt(preserveCursor) {
-    if (process.stdout.isTTY && !this._closed) {
-      this.readlineInterface.prompt(preserveCursor);
-    }
-  }
-
-  setPrompt(p) {
-    if (!this._closed) this.readlineInterface.setPrompt(p);
-  }
-
-  print(type, msg, color) {
-    if (!process.stdout.isTTY) {
-      if (type === Console.Types.Incoming) {
-        process.stdout.write(`${msg}\n`);
-      } else if (type === Console.Types.Error) {
-        process.stderr.write(`${type}${msg}\n`);
-      }
-      return;
-    }
-
-    this.clear();
-    color = color || Console.Colors.Default;
-    const prefix = type || '';
-    if (opts.color !== false) {
-      this.stdout.write(`${color}${prefix}${msg}${Console.Colors.Default}\n`);
-    } else {
-      this.stdout.write(`${prefix}${msg}\n`);
-    }
-    this.prompt();
-  }
-
-  clear() {
-    if (process.stdout.isTTY) {
-      this.stdout.write('\x1b[2K\x1b[E');
-    }
-  }
-
-  pause() {
-    this.stdin.on('keypress', this._resetInput);
-  }
-
-  resume() {
-    this.stdin.removeListener('keypress', this._resetInput);
-  }
-}
-
-// collector for repeatable options: .option(..., collect, [])
-const collect = (val, list) => [...list, val];
-
-function splitOnce(str, sep) {
-  const i = str.indexOf(sep);
-  return i === -1 ? [str, ''] : [str.slice(0, i), str.slice(i + 1)];
-}
-
-/**
- * The actual application
- */
+const require = createRequire(import.meta.url);
 const version = require('../package.json').version;
+
+const collect = (val, list) => [...list, val];
 
 program
   .version(version)
@@ -285,235 +43,82 @@ program
   .option('-r, --retry', 'retry on disconnection (--connect only)')
   .option('-k, --keepalive <interval>', 'send a ping every interval milliseconds')
   .option('-P, --parsecommands', 'parse input for commands (send, ping, pong, close, last, counts)')
+  .option('--no-tui', 'disable TUI mode, use classic readline interface')
   .parse(process.argv);
 
 const opts = program.opts();
 
-let ws;
-let wsConsole;
-
 if (opts.listen && opts.connect) {
   process.stderr.write('\x1b[33merror: use either --listen or --connect\x1b[39m\n');
   process.exit(1);
-} else if (opts.listen) {
+}
+
+if (!opts.listen && !opts.connect) {
+  program.help();
+}
+
+// Validate listen port
+if (opts.listen) {
   const port = parseInt(opts.listen, 10);
   if (isNaN(port) || port < 1 || port > 65535) {
     process.stderr.write('\x1b[33merror: --listen port must be a number between 1 and 65535\x1b[39m\n');
     process.exit(1);
   }
+  opts.listenPort = port;
+}
 
-  wsConsole = new Console();
-  wsConsole.pause();
-
-  const options = {};
-  if (opts.protocol) options.protocolVersion = opts.protocol;
-  if (opts.origin) options.origin = opts.origin;
-  if (opts.subprotocol && opts.subprotocol.length) options.protocol = opts.subprotocol.join(', ');
-  if (!opts.check) options.rejectUnauthorized = false;
-
-  const wss = new WebSocket.Server({ port }, () => {
-    wsConsole.print(Console.Types.Control, `listening on port ${port} (press CTRL+C to quit)`, Console.Colors.Green);
-    if (opts.parsecommands) printCommands();
-    wsConsole.clear();
-  });
-
-  wsConsole.on('close', () => {
-    try { ws.close(); } catch (e) {}
-    process.exit(0);
-  });
-
-  wsConsole.on('line', parseInput);
-
-  wss.on('connection', (newClient) => {
-    if (ws) return newClient.terminate();
-
-    ws = newClient;
-    resetStats();
-    wsConsole.resume();
-    wsConsole.prompt();
-    wsConsole.print(Console.Types.Control, 'client connected', Console.Colors.Green);
-    stats.connectionStartTime = Date.now();
-
-    if (opts.keepalive) interval = startKeepalive(ws);
-
-    wireSocketEvents(ws, () => {
-      wsConsole.pause();
-      ws = null;
-    });
-
-    ws.on('error', (err) => {
-      wsConsole.print(Console.Types.Error, err.message, Console.Colors.Yellow);
-      printCounts();
-    });
-  }).on('error', (err) => {
-    wsConsole.print(Console.Types.Error, err.toString(), Console.Colors.Yellow);
-    process.exit(1);
-  });
-} else if (opts.connect) {
-  let isOpen = false;
-  wsConsole = new Console();
-
-  const buildOptions = (passphrase) => {
-    const options = {};
-    if (opts.protocol) options.protocolVersion = opts.protocol;
-    if (opts.origin) options.origin = opts.origin;
-    if (opts.subprotocol && opts.subprotocol.length) options.protocol = opts.subprotocol;
-    if (opts.host) options.host = opts.host;
-    if (!opts.check) options.rejectUnauthorized = false;
-    if (opts.ca) options.ca = fs.readFileSync(opts.ca);
-    if (opts.cert) options.cert = fs.readFileSync(opts.cert);
-    if (opts.key) options.key = fs.readFileSync(opts.key);
-    if (passphrase) options.passphrase = passphrase;
-    if (opts.location) options.followRedirects = true;
-    if (opts.maxRedirects) options.maxRedirects = opts.maxRedirects;
-    if (opts.proxy) options.agent = new HttpsProxyAgent(opts.proxy);
-
-    const headers = {};
-    (opts.header || []).forEach((h) => {
-      const [key, val] = splitOnce(h, ':');
-      headers[key] = val;
-    });
-
-    if (opts.auth) {
-      headers['Authorization'] = `Basic ${Buffer.from(opts.auth).toString('base64')}`;
-    }
-
-    options.headers = headers;
-    return options;
-  };
-
+// Validate and normalize connect URL
+if (opts.connect) {
   let connectUrl = opts.connect;
   if (!connectUrl.match(/\w+:\/\/.*$/i)) {
     connectUrl = `ws://${connectUrl}`;
   }
-
   try {
     new URL(connectUrl);
   } catch (e) {
     process.stderr.write(`\x1b[33merror: invalid URL "${connectUrl}"\x1b[39m\n`);
     process.exit(1);
   }
-
-  let retryTimer = null;
-  let numRetries = 0;
-  const maxRetries = 4;
-
-  const retry = () => {
-    if (retryTimer) return;
-    if (++numRetries > maxRetries) {
-      wsConsole.setPrompt('disconnected, press return to retry or ctrl-c to quit');
-      wsConsole.prompt();
-    } else {
-      retryTimer = setTimeout(() => {
-        retryTimer = null;
-        connect(cachedPassphrase);
-      }, 500);
-    }
-  };
-
-  let cachedPassphrase;
-
-  const connect = (passphrase) => {
-    if (ws) return;
-
-    if (opts.retry) {
-      wsConsole.setPrompt('connecting... ');
-      wsConsole.prompt();
-    }
-
-    ws = new WebSocket(connectUrl, buildOptions(passphrase));
-
-    ws.on('open', () => {
-      stats.connectionStartTime = Date.now();
-
-      if (opts.keepalive) interval = startKeepalive(ws);
-
-      wsConsole.print(Console.Types.Control, 'connected (press CTRL+C to quit)', Console.Colors.Green);
-
-      // --message: send then stay interactive
-      (opts.message || []).forEach((msg) => {
-        ws.send(msg);
-        wsConsole.print(Console.Types.Control, `> ${msg}`);
-        stats.messagesSent++;
-      });
-
-      // --execute: send then close after --wait seconds
-      if (opts.execute.length > 0) {
-        opts.execute.forEach((msg) => {
-          ws.send(msg);
-          wsConsole.print(Console.Types.Control, `> ${msg}`);
-          stats.messagesSent++;
-        });
-        if (opts.wait >= 0) setTimeout(() => ws.close(), opts.wait * 1000);
-        // wait === -1: hold open forever (user must Ctrl+C)
-      }
-
-      wsConsole.setPrompt('> ');
-      wsConsole.prompt();
-      isOpen = true;
-      numRetries = 0;
-    });
-
-    wireSocketEvents(ws, () => {
-      isOpen = false;
-      ws = null;
-      if (opts.retry) {
-        retry();
-      } else {
-        process.exit();
-      }
-    });
-
-    ws.on('error', (err) => {
-      if (numRetries === 0) {
-        wsConsole.print(Console.Types.Error, err.message, Console.Colors.Yellow);
-        printCounts();
-      }
-      ws = null;
-      if (opts.retry) {
-        retry();
-      } else {
-        process.exit(1);
-      }
-    });
-  };
-
-  // Handle --passphrase: prompt interactively if no value given
-  if (opts.passphrase === true) {
-    read({ prompt: 'Passphrase: ', silent: true }, (err, passphrase) => {
-      if (err) {
-        process.stderr.write(`error: ${err.message}\n`);
-        process.exit(1);
-      }
-      cachedPassphrase = passphrase;
-      connect(passphrase);
-    });
-  } else {
-    cachedPassphrase = opts.passphrase;
-    connect(opts.passphrase);
-  }
-
-  wsConsole.on('line', (data) => {
-    if (!isOpen && numRetries > maxRetries) { numRetries = 0; connect(cachedPassphrase); }
-    if (!isOpen) return;
-    parseInput(data);
-  });
-
-  wsConsole.on('close', () => {
-    printCounts();
-    if (!ws) return;
-    try { ws.close(); } catch (e) {}
-    process.exit();
-  });
-
-  // SIGINT handler for clean shutdown (especially useful with --execute --wait -1)
-  process.on('SIGINT', () => {
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.close();
-    } else {
-      process.exit();
-    }
-  });
-} else {
-  program.help();
+  opts.connectUrl = connectUrl;
 }
+
+// Determine whether to use TUI or readline
+const useReadline = !opts.tui || !process.stdout.isTTY || (opts.execute && opts.execute.length > 0);
+
+// Handle passphrase prompt before starting UI
+async function getPassphrase() {
+  if (opts.passphrase === true) {
+    const { default: read } = await import('read');
+    return new Promise((resolve, reject) => {
+      read({ prompt: 'Passphrase: ', silent: true }, (err, passphrase) => {
+        if (err) {
+          process.stderr.write(`error: ${err.message}\n`);
+          process.exit(1);
+        }
+        resolve(passphrase);
+      });
+    });
+  }
+  return opts.passphrase || undefined;
+}
+
+async function main() {
+  const passphrase = opts.connect ? await getPassphrase() : undefined;
+  const engine = new WsEngine(opts);
+
+  if (useReadline) {
+    const { ReadlineUI } = await import('../lib/readline-ui.js');
+    const ui = new ReadlineUI(engine, opts);
+
+    if (opts.listen) {
+      ui.startListen(opts.listenPort);
+    } else {
+      ui.startConnect(passphrase);
+    }
+  } else {
+    const { startTui } = await import('../lib/tui/app.js');
+    startTui(engine, opts, passphrase);
+  }
+}
+
+main();
