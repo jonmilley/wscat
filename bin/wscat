@@ -20,27 +20,41 @@ const read = require('read');
  * Stats tracking
  */
 let interval = null;
-let messagesSent = 0;
-let messagesReceived = 0;
-let pingsSent = 0;
-let pingsReceived = 0;
-let pongsSent = 0;
-let pongsReceived = 0;
-let lastMessage = null;
-let connectionStartTime;
+
+const stats = {
+  messagesSent: 0,
+  messagesReceived: 0,
+  pingsSent: 0,
+  pingsReceived: 0,
+  pongsSent: 0,
+  pongsReceived: 0,
+  lastMessage: null,
+  connectionStartTime: null
+};
+
+function resetStats() {
+  stats.messagesSent = 0;
+  stats.messagesReceived = 0;
+  stats.pingsSent = 0;
+  stats.pingsReceived = 0;
+  stats.pongsSent = 0;
+  stats.pongsReceived = 0;
+  stats.lastMessage = null;
+  stats.connectionStartTime = null;
+}
 
 function printCounts() {
-  const elapsed = Date.now() - connectionStartTime;
+  const elapsed = Date.now() - stats.connectionStartTime;
   wsConsole.print(Console.Types.Control, `Connection Open for ${elapsed} ms`, Console.Colors.Green);
-  wsConsole.print(Console.Types.Control, `${messagesReceived} message(s) Received`, Console.Colors.Green);
-  wsConsole.print(Console.Types.Control, `${messagesSent} message(s) Sent`, Console.Colors.Green);
-  wsConsole.print(Console.Types.Control, `${pingsReceived} ping(s) Received`, Console.Colors.Green);
-  wsConsole.print(Console.Types.Control, `${pingsSent} ping(s) Sent`, Console.Colors.Green);
-  wsConsole.print(Console.Types.Control, `${pongsReceived} pong(s) Received`, Console.Colors.Green);
-  wsConsole.print(Console.Types.Control, `${pongsSent} pong(s) Sent`, Console.Colors.Green);
-  if (lastMessage) {
+  wsConsole.print(Console.Types.Control, `${stats.messagesReceived} message(s) Received`, Console.Colors.Green);
+  wsConsole.print(Console.Types.Control, `${stats.messagesSent} message(s) Sent`, Console.Colors.Green);
+  wsConsole.print(Console.Types.Control, `${stats.pingsReceived} ping(s) Received`, Console.Colors.Green);
+  wsConsole.print(Console.Types.Control, `${stats.pingsSent} ping(s) Sent`, Console.Colors.Green);
+  wsConsole.print(Console.Types.Control, `${stats.pongsReceived} pong(s) Received`, Console.Colors.Green);
+  wsConsole.print(Console.Types.Control, `${stats.pongsSent} pong(s) Sent`, Console.Colors.Green);
+  if (stats.lastMessage) {
     wsConsole.print(Console.Types.Control, 'Last Message Received =', Console.Colors.Green);
-    wsConsole.print(Console.Types.Incoming, lastMessage);
+    wsConsole.print(Console.Types.Incoming, stats.lastMessage);
   }
 }
 
@@ -56,7 +70,7 @@ function printCommands() {
 function startKeepalive(socket) {
   return setInterval(() => {
     socket.ping();
-    pingsSent++;
+    stats.pingsSent++;
     wsConsole.print(Console.Types.Control, 'ping sent', Console.Colors.Green);
   }, opts.keepalive);
 }
@@ -65,12 +79,12 @@ function handleSlashCommand(data) {
   if (data.startsWith('/ping')) {
     const payload = data.slice('/ping'.length).trim();
     ws.ping(payload || undefined);
-    pingsSent++;
+    stats.pingsSent++;
     wsConsole.print(Console.Types.Control, 'ping sent', Console.Colors.Green);
   } else if (data.startsWith('/pong')) {
     const payload = data.slice('/pong'.length).trim();
     ws.pong(payload || undefined);
-    pongsSent++;
+    stats.pongsSent++;
     wsConsole.print(Console.Types.Control, 'pong sent', Console.Colors.Green);
   } else if (data.startsWith('/close')) {
     const parts = data.slice('/close'.length).trim().split(/\s+/);
@@ -88,24 +102,22 @@ function parseInput(data) {
       const msg = data.slice('send '.length);
       ws.send(msg);
       wsConsole.print(Console.Types.Control, `sent (${msg})`, Console.Colors.Green);
-      messagesSent++;
+      stats.messagesSent++;
     } else if (data === 'ping' || data.startsWith('ping ')) {
       ws.ping();
-      pingsSent++;
+      stats.pingsSent++;
       wsConsole.print(Console.Types.Control, 'ping sent', Console.Colors.Green);
     } else if (data === 'pong' || data.startsWith('pong ')) {
       ws.pong();
-      pongsSent++;
+      stats.pongsSent++;
       wsConsole.print(Console.Types.Control, 'pong sent', Console.Colors.Green);
     } else if (data === 'close' || data.startsWith('close ')) {
       ws.close(1001, 'Client Closing.');
       wsConsole.print(Console.Types.Control, 'Connection Closed', Console.Colors.Green);
-      printCounts();
-      process.exit();
     } else if (data === 'last') {
-      if (lastMessage) {
+      if (stats.lastMessage) {
         wsConsole.print(Console.Types.Control, 'Last Message Received =', Console.Colors.Green);
-        wsConsole.print(Console.Types.Incoming, lastMessage);
+        wsConsole.print(Console.Types.Incoming, stats.lastMessage);
       }
     } else if (data === 'counts') {
       printCounts();
@@ -116,9 +128,40 @@ function parseInput(data) {
     handleSlashCommand(data);
   } else {
     ws.send(data);
-    messagesSent++;
+    stats.messagesSent++;
   }
   wsConsole.prompt();
+}
+
+/**
+ * Wires shared socket event handlers onto a socket.
+ * @param {WebSocket} socket - the websocket to attach handlers to
+ * @param {Function} onClose - callback invoked after close handling (code, reasonStr)
+ */
+function wireSocketEvents(socket, onClose) {
+  socket.on('close', (code, reason) => {
+    const reasonStr = reason ? reason.toString() : '';
+    wsConsole.print(Console.Types.Control, `disconnected (code: ${code}, reason: "${reasonStr}")`, Console.Colors.Green);
+    printCounts();
+    if (interval != null) {
+      clearInterval(interval);
+      interval = null;
+    }
+    wsConsole.clear();
+    onClose(code, reasonStr);
+  }).on('message', (data) => {
+    stats.messagesReceived++;
+    stats.lastMessage = data.toString();
+    wsConsole.print(Console.Types.Incoming, stats.lastMessage, Console.Colors.Blue);
+  }).on('pong', () => {
+    stats.pongsReceived++;
+    if (opts.showPingPong) wsConsole.print(Console.Types.Control, 'pong received', Console.Colors.Green);
+  }).on('ping', () => {
+    // ws v8 automatically sends the pong frame before emitting this event
+    stats.pingsReceived++;
+    stats.pongsSent++;
+    if (opts.showPingPong) wsConsole.print(Console.Types.Control, 'pong sent (auto-reply)', Console.Colors.Green);
+  });
 }
 
 /**
@@ -144,24 +187,25 @@ class Console extends EventEmitter {
 
     this.stdin = process.stdin;
     this.stdout = process.stdout;
+    this._closed = false;
 
     this.readlineInterface = readline.createInterface(this.stdin, this.stdout);
 
     this.readlineInterface
       .on('line', (data) => this.emit('line', data))
-      .on('close', () => this.emit('close'));
+      .on('close', () => { this._closed = true; this.emit('close'); });
 
     this._resetInput = () => this.clear();
   }
 
   prompt(preserveCursor) {
-    if (process.stdout.isTTY) {
+    if (process.stdout.isTTY && !this._closed) {
       this.readlineInterface.prompt(preserveCursor);
     }
   }
 
   setPrompt(p) {
-    this.readlineInterface.setPrompt(p);
+    if (!this._closed) this.readlineInterface.setPrompt(p);
   }
 
   print(type, msg, color) {
@@ -220,7 +264,7 @@ program
   .option('-c, --connect <url>', 'connect to a websocket server')
   .option('-m, --message <message>', 'initial message to send (repeatable)', collect, [])
   .option('-x, --execute <cmd>', 'send message on open, then close after --wait (repeatable)', collect, [])
-  .option('-w, --wait <seconds>', 'wait time after --execute (-1 = hold open)', 2)
+  .option('-w, --wait <seconds>', 'wait time after --execute (-1 = hold open)', parseFloat, 2)
   .option('-p, --protocol <version>', 'optional protocol version')
   .option('-o, --origin <origin>', 'optional origin')
   .option('--host <host>', 'optional host')
@@ -252,6 +296,12 @@ if (opts.listen && opts.connect) {
   process.stderr.write('\x1b[33merror: use either --listen or --connect\x1b[39m\n');
   process.exit(1);
 } else if (opts.listen) {
+  const port = parseInt(opts.listen, 10);
+  if (isNaN(port) || port < 1 || port > 65535) {
+    process.stderr.write('\x1b[33merror: --listen port must be a number between 1 and 65535\x1b[39m\n');
+    process.exit(1);
+  }
+
   wsConsole = new Console();
   wsConsole.pause();
 
@@ -261,8 +311,8 @@ if (opts.listen && opts.connect) {
   if (opts.subprotocol && opts.subprotocol.length) options.protocol = opts.subprotocol.join(', ');
   if (!opts.check) options.rejectUnauthorized = false;
 
-  const wss = new WebSocket.Server({ port: opts.listen }, () => {
-    wsConsole.print(Console.Types.Control, `listening on port ${opts.listen} (press CTRL+C to quit)`, Console.Colors.Green);
+  const wss = new WebSocket.Server({ port }, () => {
+    wsConsole.print(Console.Types.Control, `listening on port ${port} (press CTRL+C to quit)`, Console.Colors.Green);
     if (opts.parsecommands) printCommands();
     wsConsole.clear();
   });
@@ -278,39 +328,22 @@ if (opts.listen && opts.connect) {
     if (ws) return newClient.terminate();
 
     ws = newClient;
+    resetStats();
     wsConsole.resume();
     wsConsole.prompt();
     wsConsole.print(Console.Types.Control, 'client connected', Console.Colors.Green);
-    connectionStartTime = Date.now();
+    stats.connectionStartTime = Date.now();
 
     if (opts.keepalive) interval = startKeepalive(ws);
 
-    ws.on('close', (code, reason) => {
-      const reasonStr = reason ? reason.toString() : '';
-      wsConsole.print(Console.Types.Control, `disconnected (code: ${code}, reason: "${reasonStr}")`, Console.Colors.Green);
-      printCounts();
-      if (interval != null) {
-        clearInterval(interval);
-        interval = null;
-      }
-      wsConsole.clear();
+    wireSocketEvents(ws, () => {
       wsConsole.pause();
       ws = null;
-    }).on('error', (err) => {
-      printCounts();
+    });
+
+    ws.on('error', (err) => {
       wsConsole.print(Console.Types.Error, err.message, Console.Colors.Yellow);
-    }).on('message', (data) => {
-      lastMessage = data.toString();
-      wsConsole.print(Console.Types.Incoming, lastMessage, Console.Colors.Blue);
-      messagesReceived++;
-    }).on('pong', () => {
-      pongsReceived++;
-      if (opts.showPingPong) wsConsole.print(Console.Types.Control, 'pong received', Console.Colors.Green);
-    }).on('ping', () => {
-      // ws v8 automatically sends the pong frame before emitting this event
-      pingsReceived++;
-      pongsSent++;
-      if (opts.showPingPong) wsConsole.print(Console.Types.Control, 'pong sent (auto-reply)', Console.Colors.Green);
+      printCounts();
     });
   }).on('error', (err) => {
     wsConsole.print(Console.Types.Error, err.toString(), Console.Colors.Yellow);
@@ -354,6 +387,13 @@ if (opts.listen && opts.connect) {
     connectUrl = `ws://${connectUrl}`;
   }
 
+  try {
+    new URL(connectUrl);
+  } catch (e) {
+    process.stderr.write(`\x1b[33merror: invalid URL "${connectUrl}"\x1b[39m\n`);
+    process.exit(1);
+  }
+
   let retryTimer = null;
   let numRetries = 0;
   const maxRetries = 4;
@@ -384,7 +424,7 @@ if (opts.listen && opts.connect) {
     ws = new WebSocket(connectUrl, buildOptions(passphrase));
 
     ws.on('open', () => {
-      connectionStartTime = Date.now();
+      stats.connectionStartTime = Date.now();
 
       if (opts.keepalive) interval = startKeepalive(ws);
 
@@ -394,7 +434,7 @@ if (opts.listen && opts.connect) {
       (opts.message || []).forEach((msg) => {
         ws.send(msg);
         wsConsole.print(Console.Types.Control, `> ${msg}`);
-        messagesSent++;
+        stats.messagesSent++;
       });
 
       // --execute: send then close after --wait seconds
@@ -402,56 +442,39 @@ if (opts.listen && opts.connect) {
         opts.execute.forEach((msg) => {
           ws.send(msg);
           wsConsole.print(Console.Types.Control, `> ${msg}`);
-          messagesSent++;
+          stats.messagesSent++;
         });
-        const waitSecs = parseFloat(opts.wait);
-        if (waitSecs >= 0) setTimeout(() => ws.close(), waitSecs * 1000);
-        // waitSecs === -1: hold open forever (user must Ctrl+C)
+        if (opts.wait >= 0) setTimeout(() => ws.close(), opts.wait * 1000);
+        // wait === -1: hold open forever (user must Ctrl+C)
       }
 
       wsConsole.setPrompt('> ');
       wsConsole.prompt();
       isOpen = true;
       numRetries = 0;
-    }).on('close', (code, reason) => {
+    });
+
+    wireSocketEvents(ws, () => {
       isOpen = false;
-      const reasonStr = reason ? reason.toString() : '';
-      wsConsole.print(Console.Types.Control, `disconnected (code: ${code}, reason: "${reasonStr}")`, Console.Colors.Green);
-      if (interval != null) {
-        clearInterval(interval);
-        interval = null;
-      }
-      wsConsole.clear();
       ws = null;
       if (opts.retry) {
         retry();
       } else {
         process.exit();
       }
-    }).on('error', (err) => {
+    });
+
+    ws.on('error', (err) => {
       if (numRetries === 0) {
-        printCounts();
         wsConsole.print(Console.Types.Error, err.message, Console.Colors.Yellow);
+        printCounts();
       }
       ws = null;
       if (opts.retry) {
         retry();
       } else {
-        printCounts();
         process.exit(1);
       }
-    }).on('message', (data) => {
-      messagesReceived++;
-      lastMessage = data.toString();
-      wsConsole.print(Console.Types.Incoming, lastMessage, Console.Colors.Blue);
-    }).on('pong', () => {
-      pongsReceived++;
-      if (opts.showPingPong) wsConsole.print(Console.Types.Control, 'pong received', Console.Colors.Green);
-    }).on('ping', () => {
-      // ws v8 automatically sends the pong frame before emitting this event
-      pingsReceived++;
-      pongsSent++;
-      if (opts.showPingPong) wsConsole.print(Console.Types.Control, 'pong sent (auto-reply)', Console.Colors.Green);
     });
   };
 
@@ -481,6 +504,15 @@ if (opts.listen && opts.connect) {
     if (!ws) return;
     try { ws.close(); } catch (e) {}
     process.exit();
+  });
+
+  // SIGINT handler for clean shutdown (especially useful with --execute --wait -1)
+  process.on('SIGINT', () => {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.close();
+    } else {
+      process.exit();
+    }
   });
 } else {
   program.help();
